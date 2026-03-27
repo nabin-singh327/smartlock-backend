@@ -404,3 +404,10 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     print(f"🚀 SmartLock Backend starting on port {port}")
     app.run(debug=False, host='0.0.0.0', port=port)
+
+    @app.route('/admin/reset_db', methods=['GET'])
+def reset_db():
+    """Temporarily reset database - remove after use"""
+    db.drop_all()
+    db.create_all()
+    return jsonify({"message": "Database reset successfully"}), 200
