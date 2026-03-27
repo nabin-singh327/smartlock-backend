@@ -397,13 +397,6 @@ def internal_error(error):
 
 # ==================== MAIN ====================
 
-@app.route('/admin/reset_db', methods=['GET'])
-def reset_db():
-    """Temporarily reset database - remove after use"""
-    db.drop_all()
-    db.create_all()
-    return jsonify({"message": "Database reset successfully"}), 200
-
 
 if __name__ == '__main__':
     with app.app_context():
