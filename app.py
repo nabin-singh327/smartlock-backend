@@ -23,6 +23,12 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # Initialize SQLAlchemy
 db = SQLAlchemy(app)
 
+# Auto-create tables on startup
+with app.app_context():
+    db.drop_all()
+    db.create_all()
+    print("✓ Database recreated")
+
 # Initialize Firebase Admin (only if key file exists)
 try:
     import firebase_admin
@@ -400,6 +406,7 @@ def internal_error(error):
 
 if __name__ == '__main__':
     with app.app_context():
+        db.drop_all()
         db.create_all()
         print("✓ Database initialized")
     port = int(os.environ.get("PORT", 5000))
