@@ -23,6 +23,16 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # Initialize SQLAlchemy
 db = SQLAlchemy(app)
 
+# Auto-migrate: add missing columns
+with app.app_context():
+    try:
+        db.engine.execute('ALTER TABLE users ADD COLUMN fcm_token VARCHAR(255)')
+        print("✓ Added fcm_token column")
+    except Exception:
+        pass  # Column already exists
+    db.create_all()
+    print("✓ Database initialized")
+
 # Auto-create tables on startup
 with app.app_context():
     db.create_all()
