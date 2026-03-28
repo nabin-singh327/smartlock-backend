@@ -65,6 +65,28 @@ except Exception as e:
     print(f"⚠ Firebase init failed: {e}")
 
 
+def send_push_notification(title, body):
+    """Send push notification to all registered devices"""
+    try:
+        import firebase_admin
+        from firebase_admin import messaging
+        fcm_tokens = [u.fcm_token for u in User.query.all() if u.fcm_token]
+        print(f"FCM tokens found: {len(fcm_tokens)}")
+        if not fcm_tokens:
+            print("No FCM tokens registered")
+            return
+        message = messaging.MulticastMessage(
+            notification=messaging.Notification(title=title, body=body),
+            tokens=fcm_tokens,
+        )
+        response = messaging.send_each_for_multicast(message)
+        print(f"✓ Push sent: {title}, success: {response.success_count}, failed: {response.failure_count}")
+    except Exception as e:
+        import traceback
+        print(f"Push notification failed: {e}")
+        print(traceback.format_exc())
+
+
 # ==================== DATABASE MODELS ====================
 
 class User(db.Model):
