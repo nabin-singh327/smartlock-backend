@@ -26,10 +26,12 @@ db = SQLAlchemy(app)
 # Auto-migrate: add missing columns
 with app.app_context():
     try:
-        db.engine.execute('ALTER TABLE users ADD COLUMN fcm_token VARCHAR(255)')
-        print("✓ Added fcm_token column")
-    except Exception:
-        pass  # Column already exists
+        with db.engine.connect() as conn:
+            conn.execute(db.text('ALTER TABLE users ADD COLUMN fcm_token VARCHAR(255)'))
+            conn.commit()
+            print("✓ Added fcm_token column")
+    except Exception as e:
+        print(f"Migration note: {e}")
     db.create_all()
     print("✓ Database initialized")
 
