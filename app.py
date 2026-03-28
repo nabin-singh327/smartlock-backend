@@ -25,9 +25,8 @@ db = SQLAlchemy(app)
 
 # Auto-create tables on startup
 with app.app_context():
-    db.drop_all()
     db.create_all()
-    print("✓ Database recreated")
+    print("✓ Database initialized")
 
 # Initialize Firebase Admin (only if key file exists)
 try:
@@ -406,7 +405,6 @@ def internal_error(error):
 
 if __name__ == '__main__':
     with app.app_context():
-        db.drop_all()
         db.create_all()
         print("✓ Database initialized")
     port = int(os.environ.get("PORT", 5000))
