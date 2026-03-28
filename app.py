@@ -40,37 +40,29 @@ with app.app_context():
     db.create_all()
     print("✓ Database initialized")
 
-# Initialize Firebase Admin (only if key file exists)
+# Initialize Firebase Admin
 try:
     import firebase_admin
     from firebase_admin import credentials, messaging
-    key_path = os.path.join(basedir, 'firebase-key.json')
-    if os.path.exists(key_path):
-        cred = credentials.Certificate(key_path)
+    import base64
+    import json
+    
+    firebase_key_b64 = os.environ.get('FIREBASE_KEY_BASE64')
+    if firebase_key_b64:
+        key_dict = json.loads(base64.b64decode(firebase_key_b64).decode('utf-8'))
+        cred = credentials.Certificate(key_dict)
         firebase_admin.initialize_app(cred)
-        print("✓ Firebase initialized")
+        print("✓ Firebase initialized from environment variable")
     else:
-        print("⚠ firebase-key.json not found, push notifications disabled")
+        key_path = os.path.join(basedir, 'firebase-key.json')
+        if os.path.exists(key_path):
+            cred = credentials.Certificate(key_path)
+            firebase_admin.initialize_app(cred)
+            print("✓ Firebase initialized from file")
+        else:
+            print("⚠ Firebase key not found, push notifications disabled")
 except Exception as e:
     print(f"⚠ Firebase init failed: {e}")
-
-def send_push_notification(title, body):
-    """Send push notification to all registered devices"""
-    try:
-        import firebase_admin
-        from firebase_admin import messaging
-        fcm_tokens = [u.fcm_token for u in User.query.all() if u.fcm_token]
-        if not fcm_tokens:
-            print("No FCM tokens registered")
-            return
-        message = messaging.MulticastMessage(
-            notification=messaging.Notification(title=title, body=body),
-            tokens=fcm_tokens,
-        )
-        messaging.send_each_for_multicast(message)
-        print(f"✓ Push notification sent: {title}")
-    except Exception as e:
-        print(f"Push notification failed: {e}")
 
 
 # ==================== DATABASE MODELS ====================
