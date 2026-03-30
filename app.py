@@ -1,13 +1,14 @@
 """
 SmartLock Backend - Flask API with SQLAlchemy ORM
-Raspberry Pi Smart Lock System
+Raspberry Pi Smart Lock System — with Secure Stream Proxy
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
+import hashlib
 from datetime import datetime
 import os
 
@@ -32,21 +33,23 @@ with app.app_context():
             print("✓ Added fcm_token column")
     except Exception as e:
         print(f"Migration note: {e}")
+    try:
+        with db.engine.connect() as conn:
+            conn.execute(db.text('ALTER TABLE raspberry_pis ADD COLUMN stream_token VARCHAR(64)'))
+            conn.commit()
+            print("✓ Added stream_token column")
+    except Exception as e:
+        print(f"Migration note: {e}")
     db.create_all()
     print("✓ Database initialized")
 
-# Auto-create tables on startup
-with app.app_context():
-    db.create_all()
-    print("✓ Database initialized")
-
-# Initialize Firebase Admin
+# Initialize Firebase Admin (only if key file exists)
 try:
     import firebase_admin
     from firebase_admin import credentials, messaging
     import base64
     import json
-    
+
     firebase_key_b64 = os.environ.get('FIREBASE_KEY_BASE64')
     if firebase_key_b64:
         key_dict = json.loads(base64.b64decode(firebase_key_b64).decode('utf-8'))
@@ -90,7 +93,6 @@ def send_push_notification(title, body):
 # ==================== DATABASE MODELS ====================
 
 class User(db.Model):
-    """User account model - stores app user login info"""
     __tablename__ = 'users'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -116,12 +118,12 @@ class User(db.Model):
 
 
 class RaspberryPi(db.Model):
-    """Raspberry Pi hardware registry model"""
     __tablename__ = 'raspberry_pis'
 
     id = db.Column(db.Integer, primary_key=True)
     unique_id = db.Column(db.String(17), unique=True, nullable=False)
     stream_url = db.Column(db.String(255), nullable=True)
+    stream_token = db.Column(db.String(64), unique=True, nullable=True)  # secure token
     last_seen = db.Column(db.DateTime, default=datetime.utcnow)
     owner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -131,7 +133,6 @@ class RaspberryPi(db.Model):
 
 
 class Log(db.Model):
-    """Access log model - records door access attempts"""
     __tablename__ = 'logs'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -144,7 +145,6 @@ class Log(db.Model):
 
 
 class PiUser(db.Model):
-    """Biometric user registry - stores users saved on the Pi"""
     __tablename__ = 'pi_users'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -167,11 +167,7 @@ def verify_token(token):
 
 @app.route('/', methods=['GET'])
 def root():
-    return jsonify({
-        "name": "SmartLock Backend API",
-        "version": "1.0.0",
-        "status": "running"
-    }), 200
+    return jsonify({"name": "SmartLock Backend API", "version": "1.0.0", "status": "running"}), 200
 
 
 # ---------- AUTHENTICATION ----------
@@ -222,7 +218,6 @@ def login():
 
 @app.route('/user/save_fcm_token', methods=['POST'])
 def save_fcm_token():
-    """Save FCM token for push notifications"""
     data = request.json
     user = verify_token(data.get('token'))
     if not user:
@@ -257,6 +252,10 @@ def get_logs():
     user = verify_token(data.get('token'))
     if not user or not user.pi_id:
         return jsonify({"message": "Unauthorized or no Pi connected"}), 401
+    # Verify ownership
+    pi = RaspberryPi.query.filter_by(unique_id=user.pi_id).first()
+    if not pi or pi.owner_id != user.id:
+        return jsonify({"message": "Access denied"}), 403
     logs = Log.query.filter_by(pi_unique_id=user.pi_id).order_by(Log.timestamp.desc()).all()
     return jsonify({
         "pi_unique_id": user.pi_id,
@@ -278,9 +277,19 @@ def get_stream_url():
     if not user or not user.pi_id:
         return jsonify({"message": "Unauthorized or no Pi connected"}), 401
     pi = RaspberryPi.query.filter_by(unique_id=user.pi_id).first()
-    if not pi or not pi.stream_url:
-        return jsonify({"message": "Stream URL not available"}), 404
-    return jsonify({"pi_unique_id": user.pi_id, "stream_url": pi.stream_url}), 200
+    if not pi:
+        return jsonify({"message": "Pi not found"}), 404
+    # Verify ownership
+    if pi.owner_id != user.id:
+        return jsonify({"message": "Access denied — you do not own this Pi"}), 403
+    if not pi.stream_url or not pi.stream_token:
+        return jsonify({"message": "Stream not available"}), 404
+    return jsonify({
+        "pi_unique_id": user.pi_id,
+        "stream_url": pi.stream_url,
+        "stream_token": pi.stream_token,
+        "stream_proxy_url": f"/stream/view/{pi.stream_token}"
+    }), 200
 
 
 @app.route('/user/get_pi_users', methods=['POST'])
@@ -289,6 +298,10 @@ def get_pi_users():
     user = verify_token(data.get('token'))
     if not user or not user.pi_id:
         return jsonify({"message": "Unauthorized or no Pi connected"}), 401
+    # Verify ownership
+    pi = RaspberryPi.query.filter_by(unique_id=user.pi_id).first()
+    if not pi or pi.owner_id != user.id:
+        return jsonify({"message": "Access denied"}), 403
     pi_internal_users = PiUser.query.filter_by(pi_unique_id=user.pi_id).all()
     return jsonify({
         "pi_unique_id": user.pi_id,
@@ -304,8 +317,37 @@ def get_pi_users():
 
 # ---------- RASPBERRY PI ENDPOINTS ----------
 
+@app.route('/pi/register_stream', methods=['POST'])
+def pi_register_stream():
+    """Pi registers its stream URL and receives a secure token."""
+    data = request.json
+    if not data or not data.get('unique_id') or not data.get('stream_url'):
+        return jsonify({"message": "Missing unique_id or stream_url"}), 400
+
+    pi_unique_id = data['unique_id'].upper()
+    pi = RaspberryPi.query.filter_by(unique_id=pi_unique_id).first()
+    if not pi:
+        pi = RaspberryPi(unique_id=pi_unique_id)
+        db.session.add(pi)
+
+    # Generate a secure stream token tied to this Pi
+    raw = f"{pi_unique_id}:{datetime.utcnow().isoformat()}:{secrets.token_hex(16)}"
+    stream_token = hashlib.sha256(raw.encode()).hexdigest()
+
+    pi.stream_url = data['stream_url']
+    pi.stream_token = stream_token
+    pi.last_seen = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({
+        "message": "Stream registered successfully",
+        "stream_token": stream_token
+    }), 200
+
+
 @app.route('/pi/update_stream', methods=['POST'])
 def update_stream():
+    """Legacy endpoint — kept for compatibility."""
     data = request.json
     if not data or not data.get('unique_id') or not data.get('stream_url'):
         return jsonify({"message": "Missing unique_id or stream_url"}), 400
@@ -318,6 +360,39 @@ def update_stream():
     pi.last_seen = datetime.utcnow()
     db.session.commit()
     return jsonify({"message": "Stream URL updated successfully", "pi_unique_id": pi_unique_id}), 200
+
+
+@app.route('/stream/view/<token>')
+def stream_proxy(token):
+    """Secure stream proxy — only valid token holders can view the Pi camera."""
+    pi = RaspberryPi.query.filter_by(stream_token=token).first()
+    if not pi or not pi.stream_url:
+        return jsonify({"message": "Invalid or expired stream token"}), 403
+
+    try:
+        import urllib.request
+        req = urllib.request.urlopen(pi.stream_url, timeout=10)
+
+        def generate():
+            try:
+                while True:
+                    chunk = req.read(4096)
+                    if not chunk:
+                        break
+                    yield chunk
+            except Exception:
+                pass
+
+        return Response(
+            generate(),
+            content_type='multipart/x-mixed-replace; boundary=frame',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no'
+            }
+        )
+    except Exception as e:
+        return jsonify({"message": f"Stream unavailable: {str(e)}"}), 503
 
 
 @app.route('/pi/add_log', methods=['POST'])
@@ -403,10 +478,10 @@ def debug_all_data():
     logs = Log.query.all()
     pi_users = PiUser.query.all()
     return jsonify({
-        "users": [{"id": u.id, "username": u.username, "email": u.email, "token": u.token, "pi_id": u.pi_id} for u in users],
-        "pis": [{"id": p.id, "unique_id": p.unique_id, "stream_url": p.stream_url, "owner_id": p.owner_id, "last_seen": p.last_seen.isoformat()} for p in pis],
-        "logs": [{"id": l.id, "pi_unique_id": l.pi_unique_id, "name": l.name, "timestamp": l.timestamp.isoformat(), "status": l.status, "method": l.method} for l in logs],
-        "pi_users": [{"id": u.id, "pi_unique_id": u.pi_unique_id, "name": u.name, "has_fingerprint": u.has_fingerprint, "has_faceid": u.has_faceid, "added_at": u.added_at.isoformat()} for u in pi_users]
+        "users": [{"id": u.id, "username": u.username, "email": u.email, "pi_id": u.pi_id} for u in users],
+        "pis": [{"id": p.id, "unique_id": p.unique_id, "stream_url": p.stream_url, "has_stream_token": bool(p.stream_token), "owner_id": p.owner_id} for p in pis],
+        "logs": [{"id": l.id, "pi_unique_id": l.pi_unique_id, "name": l.name, "status": l.status, "method": l.method} for l in logs],
+        "pi_users": [{"id": u.id, "pi_unique_id": u.pi_unique_id, "name": u.name, "has_fingerprint": u.has_fingerprint, "has_faceid": u.has_faceid} for u in pi_users]
     }), 200
 
 
@@ -427,7 +502,6 @@ def internal_error(error):
 
 
 # ==================== MAIN ====================
-
 
 if __name__ == '__main__':
     with app.app_context():
